@@ -1,11 +1,22 @@
 import Parser from 'rss-parser';
 import path, { resolve } from 'path';
 import { downloadFile, processDownloadedFile } from '../../utils/utils';
+import type { NextApiRequest, NextApiResponse } from 'next'
 
-export default async function handler(req, res) {
-    if (req.method === 'POST') {
-        const searchPhrase = req.body.searchPhrase;
-        const rssUrl = req.body.rssUrl;
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+    if (req.method === 'GET') {
+        let searchPhrase = req.query.searchPhrase as string | undefined;
+        const rssUrl = req.query.rssUrl as string | undefined;
+
+        if (!searchPhrase || !rssUrl) {
+            res.status(500).json({ error: 'Required parameters are not set' });
+            return;
+        }
+
+        // Prepend '#' to searchPhrase if it's a number
+        if (!isNaN(Number(searchPhrase))) {
+            searchPhrase = '#' + searchPhrase;
+        }
 
         const parser = new Parser();
         const feed = await parser.parseURL(rssUrl);
@@ -20,7 +31,9 @@ export default async function handler(req, res) {
             if (items.length === 1) {
                 const item = items[0];
                 const mp3Url = item.enclosure ? item.enclosure.url : null;
-                const fileName = mp3Url ? mp3Url.split('/').pop().split('.')[0] : null;
+                const splitUrl = mp3Url ? mp3Url.split('/') : null;
+                const lastPartOfUrl = splitUrl ? splitUrl.pop() : null;
+                const fileName = lastPartOfUrl ? lastPartOfUrl.split('.')[0] : null;
                 const pathToFile = fileName ? resolve(process.cwd(), './public/audio', `${fileName}.mp3`) : null;
                 const finalJsonFolder = fileName ? path.resolve('./public/json', fileName) : null;
 

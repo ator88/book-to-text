@@ -1,9 +1,9 @@
-
 import { downloadBook } from '../../utils/utils';
 import fs from 'fs';
 import path, { resolve } from 'path';
-
+import type { NextApiRequest, NextApiResponse } from 'next'
 import { exec } from 'child_process';
+import os from 'os'
 
 const email = process.env.EMAIL;
 const password = process.env.PASSWORD;
@@ -24,8 +24,19 @@ async function runFfprobe(pathToFile: string) {
 }
 
 async function runRcrack(key: string) {
-    const rcrackPath = path.resolve(process.cwd(), './public/tables-master/run/rcrack.exe');
-    const command = `${rcrackPath} . -h ${key}`;
+    let rcrackPath: string;
+    let command: string;
+
+    if (os.platform() === 'win32') {
+        // Windows
+        rcrackPath = path.resolve(process.cwd(), './public/tables-master/run/rcrack.exe');
+        command = `${rcrackPath} . -h ${key}`;
+    } else {
+        // Linux
+        rcrackPath = path.resolve(process.cwd(), './public/tables-master/run/rcrack');
+        command = `wine ${rcrackPath} . -h ${key}`;
+    }
+
     return new Promise((resolve, reject) => {
         exec(command, (error, stdout, stderr) => {
             if (error) {
@@ -47,27 +58,34 @@ async function runRcrack(key: string) {
     });
 }
 
-export default async function handler(req, res) {
-    if (req.method === 'POST') {
-        const bookTitle = req.body.bookTitle;
+export default async function handler(req: NextApiRequest, res: NextApiResponse) {
+    if (req.method === 'GET') {
+        const bookTitle = req.query.bookTitle as string | undefined;
 
-        if (bookTitle) {
-            const fileName = bookTitle.replace(/ /g, '_');
-            const aarPath = resolve(process.cwd(), './public/aar', `${fileName}.aax`);
+        if (!email || !password || !bookTitle) {
+            res.status(500).json({ error: 'Required parameters are not set' });
+            return;
+        }
 
-            const { browser, page } = await downloadBook(email, password, bookTitle, aarPath, () => {});
-            if (fs.existsSync(aarPath)) {
+        const fileName = bookTitle.replace(/ /g, '_');
+        const aarPath = resolve(process.cwd(), './public/aar', `${fileName}.aax`);
+
+        try {
+            const { browser, page } = await downloadBook(email, password, bookTitle, aarPath, async () => {
                 const key = await runFfprobe(aarPath);
                 if (key) {
-                    await runRcrack(key);
+                    await runRcrack(key as string);
                     // Close the browser after the download and extraction processes are complete
                     await browser.close();
                     res.write('Extracting activation bytes complete');
                     res.end();
+                } else {
+                    res.status(500).json({ error: 'Key extraction failed' });
+                    return;
                 }
-            }
-        } else {
-            res.status(400).json({ error: 'bookTitle is required' });
+            });
+        } catch (error) {
+            res.status(500).json({ error: error.message });
         }
     } else {
         res.status(405).json({ message: 'Method not allowed' });

@@ -5,26 +5,32 @@ import path, { resolve } from 'path';
 import axios from 'axios';
 
 export async function processFile(pathToFile: string, finalJsonFolder: string) {
-    const command = `whisperx ${pathToFile} --model large-v2 --align_model WAV2VEC2_ASR_LARGE_LV60K_960H --batch_size 8 --output_dir  ${finalJsonFolder}`;
+    const condaEnvName = 'btt';
+    const command = `conda run -n ${condaEnvName} whisperx ${pathToFile} --model large-v2 --align_model WAV2VEC2_ASR_LARGE_LV60K_960H --batch_size 8 --compute_type float32 --output_dir  ${finalJsonFolder}`;
     try {
         const stdout = execSync(command);
         return stdout;
     } catch (error) {
-        console.error(`Error during processing: ${error.message}`);
-        console.error(`Error stack: ${error.stack}`);
+        if (error instanceof Error) {
+            console.error(`Error during processing: ${error.message}`);
+            console.error(`Error stack: ${error.stack}`);
+        } else {
+            console.error(`Error during processing: ${error}`);
+        }
     }
 }
 
-export async function downloadBook(email: string, password: string, bookTitle: string, aarPath: string, onDownloadFinish) {
+export async function downloadBook(email: string, password: string, bookTitle: string, aarPath: string, onDownloadFinish: () => Promise<void>) {
     const browser = await puppeteer.launch({ headless: false });
     const page = await browser.newPage();
 
+    // Set the viewport size
+    await page.setViewport({ width: 1280, height: 800 });
+
     if (fs.existsSync(aarPath)) {
         console.log('Using local AAX file for testing');
-        await onDownloadFinish();
         return { browser, page };
     }
-
 
     await page.setRequestInterception(true);
     page.on('request', async (interceptedRequest) => {
@@ -40,13 +46,17 @@ export async function downloadBook(email: string, password: string, bookTitle: s
             const writer = fs.createWriteStream(aarPath);
             response.data.pipe(writer);
 
-            writer.on('close', async () => {
-                console.log('Download completed');
-                await onDownloadFinish();
-            });
-
-            writer.on('error', (error) => {
-                console.error(`Error during download: ${error}`);
+            return new Promise((resolve, reject) => {
+                writer.on('close', async () => {
+                    console.log('Download completed');
+                    await onDownloadFinish();
+                    resolve();
+                });
+        
+                writer.on('error', (error) => {
+                    console.error(`Error during download: ${error}`);
+                    reject(error);
+                });
             });
         } else {
             interceptedRequest.continue();
@@ -54,37 +64,42 @@ export async function downloadBook(email: string, password: string, bookTitle: s
     });
 
     await page.goto('https://www.audible.com/sign-in');
-    await page.type('#ap_email', email);
+
+    // Wait for the email input field to appear
+    await page.waitForSelector('#ap_email');
+    await page.type('#ap_email', email, { delay: 100 }); // 100ms delay between key presses
+    
+    // Wait for the password input field to appear
+    await page.waitForSelector('#ap_password');
+    await page.type('#ap_password', password, { delay: 100 }); // 100ms delay between key presses
 
     const continueButton = await page.$('#continue');
     if (continueButton) {
         await continueButton.click();
-        await page.waitForNavigation({ waitUntil: 'networkidle0' });
-        await page.type('#ap_password', password);
+        await page.waitForTimeout(3000); // wait for 3 seconds
     } else {
-        await page.type('#ap_password', password);
         const signInButton = await page.$('#signInSubmit');
         if (signInButton) {
             await signInButton.click();
+            await page.waitForTimeout(3000); // wait for 3 seconds
         }
     }
 
-    await page.waitForNavigation({ waitUntil: 'networkidle0' });
-
+    // Navigate to the library
     await page.goto('https://www.audible.com/library/titles');
-
-    try {
-        await page.type('#lib-search', bookTitle);
-        await page.keyboard.press('Enter');
-        await page.waitForSelector('.adbl-library-content-row');
-    } catch (error) {
-        console.error(`Error during page interaction: ${error}`);
-    }
+try {
+    await page.waitForSelector('#lib-search');
+    await page.type('#lib-search', bookTitle);
+    await page.keyboard.press('Enter');
+    await page.waitForSelector('.adbl-library-content-row');
+} catch (error) {
+    console.error(`Error during page interaction: ${error}`);
+}
 
     const bookElements = await page.$$('.adbl-library-content-row');
     const bookElement = bookElements.find(async (el) => {
         const textContent = await page.evaluate(el => el.textContent, el);
-        return textContent.includes(bookTitle);
+        return textContent ? textContent.includes(bookTitle) : false;
     });
 
     if (bookElement) {
@@ -93,21 +108,23 @@ export async function downloadBook(email: string, password: string, bookTitle: s
 
         if (downloadButton) {
             const boundingBox = await downloadButton.boundingBox();
-            await page.evaluate((x, y) => {
-                window.scrollBy(x, y);
-            }, boundingBox.x, boundingBox.y);
-            await downloadButton.click();
+            if (boundingBox) {
+                await page.evaluate((x, y) => {
+                    window.scrollBy(x, y);
+                }, boundingBox.x, boundingBox.y);
+                await downloadButton.click();
+            }
         }
     }
-
     return { browser, page };
 }
 
-export async function convertAndUploadAAX(aarPath, fileName, baseUrl, activationBytes) {
+export async function convertAndUploadAAX(aarPath: string, fileName: string, baseUrl: string, activationBytes: string) {
     const mp3Path = resolve(process.cwd(), './public/audio', `${fileName}.mp3`);
     const command = `ffmpeg -y -activation_bytes ${activationBytes} -i "${aarPath}" "${mp3Path}"`;
 
     try {
+        console.log('Running ffmpeg command:', command);
         execSync(command);
         console.log('Conversion completed successfully');
         const pathToFile = mp3Path;
@@ -117,8 +134,7 @@ export async function convertAndUploadAAX(aarPath, fileName, baseUrl, activation
         }
         await processFile(pathToFile, finalJsonFolder);
     } catch (error) {
-        console.error(`Error during conversion: ${error.message}`);
-        console.error(`Error stack: ${error.stack}`);
+        console.error(`Error during conversion: ${error}`);
     }
 }
 
